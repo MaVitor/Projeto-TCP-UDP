@@ -73,10 +73,8 @@ def handle_tcp_client(client_socket, client_addr_tuple):
 
             player_entry = player_data_store.get(client_ip, {"balance": 0, "name": client_ip})
             current_player_balance = player_entry.get("balance", 0)
-            # Atualiza current_player_name_for_log caso tenha sido alterado por set_name
             current_player_name_for_log = player_entry.get("name", client_ip)
 
-            # Atualiza o nome do jogador (associado ao IP) e envia uma confirmação de volta
             if command == "set_name":
                 name_from_client = message.get("name", "").strip()
                 if name_from_client:
@@ -87,9 +85,6 @@ def handle_tcp_client(client_socket, client_addr_tuple):
                 else:
                     response = {"status": "error", "message": "Nome não pode ser vazio."}
             
-            # Verifica se o jogo ta iniciado ou n, verifica se o jogador tem uma aposta ativa na rodada atual, valida se o jogador tem saldo suficiente, e,
-            # Se for válido deduz o valor do saldo no player_data_store e registra no dicionario game_state
-            # E tambem envia uma resposta com o status da aposta e o novo saldo
             elif command == "bet":
                 if game_state["status"] == "waiting":
                     amount = message.get("amount", 0)
@@ -145,17 +140,13 @@ def handle_tcp_client(client_socket, client_addr_tuple):
                 }
             
             elif command == "get_ranking":
-                # Prepara os dados para o ranking: lista de dicionários {"name": X, "balance": Y}
                 ranking_list = []
                 for ip, data in player_data_store.items():
                     ranking_list.append({
-                        "name": data.get("name", f"{DEFAULT_PLAYER_NAME}_{ip.split('.')[-1]}"), # Usa nome ou default
+                        "name": data.get("name", f"{DEFAULT_PLAYER_NAME}_{ip.split('.')[-1]}"),
                         "balance": data.get("balance", 0)
                     })
-                
-                # Ordena a lista pelo saldo, do maior para o menor
                 sorted_players = sorted(ranking_list, key=lambda x: x["balance"], reverse=True)
-                
                 response = {"status": "ranking_data", "ranking": sorted_players[:RANKING_TOP_N]}
                 print(f"Jogador '{current_player_name_for_log}' ({client_ip}) solicitou o ranking.")
 
@@ -165,7 +156,7 @@ def handle_tcp_client(client_socket, client_addr_tuple):
         print(f"Erro ao decodificar JSON de '{get_player_name(client_ip)}' ({client_addr_tuple})")
     except ConnectionResetError:
         print(f"Conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}) resetada.")
-    except BrokenPipeError: # Adicionado para tratar pipe quebrado
+    except BrokenPipeError: 
         print(f"Conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}) foi quebrada (BrokenPipe).")
     except Exception as e:
         print(f"Erro na conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}): {e}")
@@ -175,8 +166,6 @@ def handle_tcp_client(client_socket, client_addr_tuple):
         client_socket.close()
         print(f"Conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}) encerrada")
 
-
-# Função para enviar atualizações do jogo via UDP Broadcast (sem alterações)
 def broadcast_game_updates():
     while True:
         update = {
@@ -188,11 +177,9 @@ def broadcast_game_updates():
         try:
             udp_socket.sendto(message, broadcast_address)
         except Exception as e:
-            # print(f"Erro ao enviar broadcast UDP: {e}") # Pode ser verboso
             pass
         time.sleep(TICK_RATE)
 
-# Função principal do jogo (sem alterações na lógica de ranking aqui)
 def game_loop():
     global game_state
     
@@ -233,7 +220,7 @@ def game_loop():
 
         game_state["status"] = "crashed"
         final_crash_multiplier = game_state["multiplier"]
-        if final_crash_multiplier > MAX_MULTIPLIER: # Garante que não passe do teto
+        if final_crash_multiplier > MAX_MULTIPLIER: 
             final_crash_multiplier = MAX_MULTIPLIER
         
         game_state["multiplier"] = round(final_crash_multiplier,2)
@@ -264,11 +251,9 @@ def game_loop():
         
         time.sleep(5)
 
-# Inicia as threads
 threading.Thread(target=game_loop, daemon=True).start()
 threading.Thread(target=broadcast_game_updates, daemon=True).start()
 
-# Loop principal para aceitar conexões TCP
 try:
     while True:
         client_socket, client_addr = tcp_socket.accept()
