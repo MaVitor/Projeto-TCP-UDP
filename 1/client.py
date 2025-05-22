@@ -5,7 +5,7 @@ import time
 import sys
 
 # Configurações do cliente
-SERVER_HOST = '10.3.5.89'
+SERVER_HOST = '192.168.56.1'
 TCP_PORT = 5000
 UDP_PORT = 5001
 

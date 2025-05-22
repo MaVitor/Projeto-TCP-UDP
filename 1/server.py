@@ -1,280 +1,286 @@
 import socket
 import threading
-import json
 import time
-import sys
+import random
+import json
 
-# Configurações do cliente
-SERVER_HOST = '10.3.5.89'
+# Configurações do servidor
+TCP_HOST = '0.0.0.0'
 TCP_PORT = 5000
 UDP_PORT = 5001
 
+# Configurações do jogo
+MIN_MULTIPLIER = 1.0
+MAX_MULTIPLIER = 10.0
+CRASH_PROBABILITY = 0.01 # Chance de crashar
+TICK_RATE = 0.1 # Intervalo de atualização do multiplicador
+INITIAL_BALANCE = 100.0 # Saldo inicial dos jogadores
+DEFAULT_PLAYER_NAME = "Anônimo" # Nome default pra quando não colocar nome
+RANKING_TOP_N = 10 # Número de jogadores no ranking
+
+# Dicionario de Estado do jogo
+game_state = {
+    "status": "waiting",
+    "multiplier": 1.0,
+    "players": {}, # {client_addr_tuple: {"bet": amount, "cash_out": multiplier, "ip": ip_str}}
+    "history": []
+}
+
+# Saldos e Nomes dos jogadores (em memória)
+# Estrutura: {"ip_address_str": {"balance": balance_float, "name": "nome_str"}}
+player_data_store = {}
+
 # Inicializar sockets
 tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp_socket.bind((TCP_HOST, TCP_PORT))
+tcp_socket.listen(5)
+
 udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-player_name = "JogadorAnônimo"
+print(f"Servidor iniciado - TCP: {TCP_HOST}:{TCP_PORT}, UDP Broadcast para porta: {UDP_PORT}")
 
-# Conectar ao servidor
-try:
-    print(f"Tentando conectar ao servidor {SERVER_HOST}:{TCP_PORT}...")
-    tcp_socket.connect((SERVER_HOST, TCP_PORT))
-    print(f"Conectado ao servidor {SERVER_HOST}:{TCP_PORT}")
+def get_player_name(ip_str):
+    # Retorna o nome do jogador ou um nome padrão se não estiver definido
+    player_info = player_data_store.get(ip_str)
+    if player_info and player_info.get("name"):
+        return player_info["name"]
+    return f"{DEFAULT_PLAYER_NAME}_{ip_str.split('.')[-1]}"
 
-    udp_socket.bind(('0.0.0.0', UDP_PORT))
-    print(f"Escutando por atualizações UDP na porta {UDP_PORT}")
 
-    while True:
-        name_input = input("Digite seu nome para o jogo: ").strip()
-        if name_input:
-            player_name = name_input
-            name_set_message = {"command": "set_name", "name": player_name}
-            tcp_socket.send(json.dumps(name_set_message).encode('utf-8'))
-            response_name_raw = tcp_socket.recv(1024)
-            response_name = json.loads(response_name_raw.decode('utf-8'))
-            if response_name.get("status") == "name_set_ok":
-                print(f"Nome '{player_name}' registrado no servidor.")
-            else:
-                print(f"Servidor respondeu sobre o nome: {response_name.get('message', 'Status desconhecido')}")
-            break
-        else:
-            print("Nome não pode ser vazio. Tente novamente.")
+# Função para lidar com conexões TCP
+def handle_tcp_client(client_socket, client_addr_tuple):
+    client_ip = client_addr_tuple[0]
+    print(f"Nova conexão TCP de {client_addr_tuple} (IP: {client_ip})")
 
-except Exception as e:
-    print(f"Erro ao conectar ou configurar nome: {e}")
-    sys.exit(1)
+    if client_ip not in player_data_store:
+        default_name_for_new_player = f"{DEFAULT_PLAYER_NAME}_{client_ip.split('.')[-1]}"
+        player_data_store[client_ip] = {"balance": INITIAL_BALANCE, "name": default_name_for_new_player}
+        print(f"Novo jogador (IP: {client_ip}) registrado com saldo inicial de {INITIAL_BALANCE:.2f} e nome '{default_name_for_new_player}'.")
+    
+    current_player_name_for_log = get_player_name(client_ip)
 
-# Variáveis de estado do cliente
-current_multiplier = 1.0
-game_status = "waiting"
-has_active_bet = False
-bet_amount = 0
-client_balance = 0.0
-last_known_server_game_status = "waiting"
-
-# Função para receber atualizações UDP
-def receive_udp_updates():
-    global current_multiplier, game_status, has_active_bet, bet_amount, last_known_server_game_status
-
-    while True:
-        try:
-            data, _ = udp_socket.recvfrom(1024)
-            update = json.loads(data.decode('utf-8'))
-
-            current_multiplier = update.get("multiplier", current_multiplier)
-            new_server_status = update.get("status", game_status)
-
-            if new_server_status == "crashed" and last_known_server_game_status != "crashed":
-                display_name_info = f" ({player_name})" if player_name != "JogadorAnônimo" else ""
-                if has_active_bet:
-                    sys.stdout.write(f"\rCRASH em {current_multiplier:.2f}x! Você{display_name_info} não sacou a tempo.                                \n")
-                else:
-                    sys.stdout.write(f"\rCRASH em {current_multiplier:.2f}x!                                                           \n")
-                has_active_bet = False
-                bet_amount = 0
-            elif new_server_status == "waiting" and last_known_server_game_status != "waiting":
-                if last_known_server_game_status != "waiting":
-                    sys.stdout.write("\rNova rodada começando. Faça sua aposta!                                                    \n")
-                has_active_bet = False
-                bet_amount = 0
-
-            game_status = new_server_status
-            last_known_server_game_status = new_server_status
-
-            if game_status == "running":
-                sys.stdout.write(f"\rMultiplicador atual: {current_multiplier:.2f}x  ")
-                sys.stdout.flush()
-            
-        except json.JSONDecodeError:
-            pass
-        except OSError:
-             break 
-        except Exception:
-            pass
-
-# Função para enviar comandos TCP e atualizar saldo
-def send_tcp_command(command, **kwargs):
-    global client_balance
-    message = {"command": command, **kwargs}
     try:
-        tcp_socket.send(json.dumps(message).encode('utf-8'))
-        response_data = tcp_socket.recv(1024)
-        if not response_data:
-            print("\nServidor não enviou resposta (conexão fechada?).")
-            return {"status": "error", "message": "Sem resposta do servidor"}
-        response = json.loads(response_data.decode('utf-8'))
-
-        if "balance" in response: # Atualiza saldo se presente na resposta do servidor
-            client_balance = float(response["balance"])
-        if response.get("status") == "error" and "message" in response and "Saldo insuficiente" in response["message"]:
-             # Caso especial para saldo insuficiente, o saldo já está atualizado
-             pass # Não precisa fazer nada extra com o saldo aqui
-        elif "balance" in response and response.get("status") != "error": # Outras respostas OK com saldo
-             client_balance = float(response["balance"])
-
-        return response
-    except (ConnectionResetError, BrokenPipeError): # Trata ambas as exceções de conexão
-        print("\nErro: Conexão com o servidor foi perdida.")
-        # Tenta fechar o programa de forma mais controlada
-        # Pode-se adicionar uma flag para parar o loop principal
-        global running_client
-        running_client = False # Sinaliza para o loop principal parar
-        return {"status": "error", "message": "Conexão perdida"}
-    except json.JSONDecodeError:
-        print("\nErro ao decodificar resposta do servidor.")
-        return {"status": "error", "message": "Resposta inválida do servidor"}
-    except Exception as e:
-        print(f"Erro ao enviar/receber comando TCP: {e}")
-        return None
-
-# Função para exibir o menu
-def show_menu():
-    sys.stdout.write("\r" + " " * 80 + "\r") 
-    sys.stdout.flush()
-    print(f"\n===== JOGO CRASH (Jogador: {player_name}, Saldo: R${client_balance:.2f}) =====")
-    print("1. Fazer aposta")
-    print("2. Cash out")
-    print("3. Ver status do jogo e Saldo")
-    print("4. Ver Ranking dos Melhores Jogadores") # NOVA OPÇÃO
-    print("5. Sair") # Sair agora é 5
-    return input("Escolha uma opção: ")
-
-# Solicita o status inicial para obter o saldo
-print("Obtendo saldo inicial do servidor...")
-initial_status_response = send_tcp_command("status")
-if initial_status_response and "balance" in initial_status_response:
-    client_balance = float(initial_status_response["balance"])
-    # O nome pode vir do status também se o servidor o enviar
-    if "player_name" in initial_status_response and initial_status_response["player_name"] != player_name and initial_status_response["player_name"] != f"{DEFAULT_PLAYER_NAME}_{SERVER_HOST.split('.')[-1]}": # Evita sobrescrever nome recém-digitado com default
-        player_name = initial_status_response["player_name"]
-        print(f"Nome '{player_name}' e saldo inicial R${client_balance:.2f} carregados.")
-    else:
-        print(f"Saldo inicial R${client_balance:.2f} carregado.")
-
-else:
-    print("Não foi possível obter o saldo inicial do servidor.")
-
-
-# Inicia a thread para receber atualizações UDP
-udp_thread = threading.Thread(target=receive_udp_updates, daemon=True)
-udp_thread.start()
-
-running_client = True # Flag para controlar o loop principal em caso de erro de conexão
-
-# Loop principal do cliente
-try:
-    while running_client: # Modificado para usar a flag
-        if game_status != "running":
-            sys.stdout.write("\r" + " " * 70 + "\r")
-        
-        choice = show_menu()
-
-        if not running_client: break # Verifica a flag após o input
-
-        if choice == "1":
-            if game_status == "waiting":
-                if has_active_bet:
-                     print("Você já tem uma aposta ativa para esta rodada.")
-                     continue
-                try:
-                    amount_str = input(f"Seu saldo atual: R${client_balance:.2f}. Valor da aposta: ")
-                    amount = float(amount_str)
-                    if amount <= 0:
-                        print("O valor da aposta deve ser positivo.")
-                        continue
-
-                    response = send_tcp_command("bet", amount=amount)
-                    if not running_client: break # Verifica após o comando
-
-                    if response and response.get("status") == "bet_accepted":
-                        print(f"Aposta de R${response.get('amount', amount):.2f} aceita! Novo saldo: R${client_balance:.2f}")
-                        has_active_bet = True
-                        bet_amount = amount
-                    else:
-                        print(f"Erro ao apostar: {response.get('message', 'Aposta não aceita') if response else 'Sem resposta'}")
-                except ValueError:
-                    print("Por favor, insira um valor numérico válido.")
-                except Exception as e:
-                    print(f"Ocorreu um erro: {e}")
-            else:
-                print("Não é possível apostar agora (jogo não está em 'waiting' ou você já apostou).")
-
-        elif choice == "2":
-            if game_status == "running" and has_active_bet:
-                response = send_tcp_command("cash_out")
-                if not running_client: break
-
-                if response and response.get("status") == "cash_out_success":
-                    sys.stdout.write("\r" + " " * 70 + "\r")
-                    print(f"Cash out realizado com sucesso em {response['multiplier']:.2f}x!")
-                    print(f"Você ganhou R${response['winnings']:.2f}! Novo saldo: R${client_balance:.2f}")
-                    has_active_bet = False
-                else:
-                    print(f"Erro no cash out: {response.get('message', 'Cash out falhou') if response else 'Sem resposta'}")
-            else:
-                print("Não é possível fazer cash out agora (jogo não está 'running' ou não há aposta ativa).")
-
-        elif choice == "3":
-            response = send_tcp_command("status")
-            if not running_client: break
-
-            if response and response.get("status") == "game_status":
-                sys.stdout.write("\r" + " " * 70 + "\r")
-                print(f"\n--- Status do Jogo ---")
-                print(f"Status no servidor: {response['game_status']}")
-                print(f"Multiplicador no servidor: {response['multiplier']:.2f}x")
-                print(f"Seu saldo (Jogador: {player_name}): R${client_balance:.2f}")
-
-                if response.get("history"):
-                    print("Histórico recente de crashes:")
-                    for mult_val in response["history"]: # Renomeado para evitar conflito
-                        print(f"  {mult_val:.2f}x")
-            else:
-                print(f"Erro ao obter status do jogo: {response.get('message', 'Falha') if response else 'Sem resposta'}")
-        
-        elif choice == "4": # Ver Ranking
-            response = send_tcp_command("get_ranking")
-            if not running_client: break
-
-            if response and response.get("status") == "ranking_data":
-                ranking = response.get("ranking", [])
-                sys.stdout.write("\r" + " " * 70 + "\r")
-                print("\n--- RANKING DOS MELHORES JOGADORES ---")
-                if ranking:
-                    for i, player_entry in enumerate(ranking):
-                        print(f"{i+1}. {player_entry.get('name', 'N/A')} - R${player_entry.get('balance', 0):.2f}")
-                else:
-                    print("Nenhum jogador no ranking ainda ou ranking vazio.")
-            else:
-                print(f"Erro ao obter ranking: {response.get('message', 'Falha ao buscar ranking') if response else 'Sem resposta'}")
-
-
-        elif choice == "5": # Sair
-            print("Saindo do jogo...")
-            running_client = False # Sinaliza para sair do loop
-            break
+        while True:
+            data = client_socket.recv(1024)
+            if not data:
+                break
             
-        else:
-            print("Opção inválida. Tente novamente.")
+            message = json.loads(data.decode('utf-8'))
+            command = message.get("command")
+            response = {"status": "error", "message": "Comando desconhecido"}
 
-        if running_client: # Só dorme se ainda estiver rodando
-            time.sleep(0.1)
+            player_entry = player_data_store.get(client_ip, {"balance": 0, "name": client_ip})
+            current_player_balance = player_entry.get("balance", 0)
+            # Atualiza current_player_name_for_log caso tenha sido alterado por set_name
+            current_player_name_for_log = player_entry.get("name", client_ip)
 
-except KeyboardInterrupt:
-    print("\nPrograma encerrado pelo usuário.")
-except ConnectionRefusedError:
-    print(f"\nErro: Não foi possível conectar ao servidor em {SERVER_HOST}:{TCP_PORT}. Verifique se o servidor está online.")
-except Exception as e:
-    print(f"\nOcorreu um erro fatal no cliente: {e}")
-finally:
-    print("Fechando sockets...")
-    running_client = False # Garante que threads saibam que devem parar, se usarem essa flag
-    if tcp_socket:
+            # Atualiza o nome do jogador (associado ao IP) e envia uma confirmação de volta
+            if command == "set_name":
+                name_from_client = message.get("name", "").strip()
+                if name_from_client:
+                    player_data_store[client_ip]["name"] = name_from_client
+                    current_player_name_for_log = name_from_client
+                    response = {"status": "name_set_ok", "name": name_from_client, "message": f"Nome definido como {name_from_client}"}
+                    print(f"Jogador {client_addr_tuple} (IP: {client_ip}) atualizou nome para: {name_from_client}")
+                else:
+                    response = {"status": "error", "message": "Nome não pode ser vazio."}
+            
+            # Verifica se o jogo ta iniciado ou n, verifica se o jogador tem uma aposta ativa na rodada atual, valida se o jogador tem saldo suficiente, e,
+            # Se for válido deduz o valor do saldo no player_data_store e registra no dicionario game_state
+            # E tambem envia uma resposta com o status da aposta e o novo saldo
+            elif command == "bet":
+                if game_state["status"] == "waiting":
+                    amount = message.get("amount", 0)
+                    if client_addr_tuple in game_state["players"]:
+                        response = {"status": "error", "message": "Você já tem uma aposta ativa nesta rodada.", "balance": current_player_balance}
+                    elif amount <= 0:
+                        response = {"status": "error", "message": "Valor da aposta deve ser positivo.", "balance": current_player_balance}
+                    elif current_player_balance < amount:
+                        response = {"status": "error", "message": "Saldo insuficiente.", "balance": current_player_balance}
+                    else:
+                        player_data_store[client_ip]["balance"] -= amount
+                        game_state["players"][client_addr_tuple] = {
+                            "bet": amount,
+                            "cash_out": None,
+                            "ip": client_ip 
+                        }
+                        response = {"status": "bet_accepted", "amount": amount, "balance": player_data_store[client_ip]["balance"]}
+                        print(f"Jogador '{current_player_name_for_log}' ({client_ip}) apostou {amount:.2f}. Saldo restante: {player_data_store[client_ip]['balance']:.2f}")
+                else:
+                    response = {"status": "error", "message": "Apostas encerradas ou jogo em progresso.", "balance": current_player_balance}
+                    
+            elif command == "cash_out":
+                if game_state["status"] == "running":
+                    player_round_data = game_state["players"].get(client_addr_tuple)
+                    if player_round_data and player_round_data["cash_out"] is None:
+                        cash_out_multiplier = game_state["multiplier"]
+                        player_round_data["cash_out"] = cash_out_multiplier
+                        
+                        bet_amount = player_round_data["bet"]
+                        winnings = bet_amount * cash_out_multiplier
+                        player_data_store[client_ip]["balance"] += winnings
+                        
+                        response = {
+                            "status": "cash_out_success",
+                            "multiplier": cash_out_multiplier,
+                            "winnings": winnings,
+                            "balance": player_data_store[client_ip]["balance"]
+                        }
+                        print(f"Jogador '{current_player_name_for_log}' ({client_ip}) sacou em {cash_out_multiplier:.2f}x. Ganhos: {winnings:.2f}. Novo saldo: {player_data_store[client_ip]['balance']:.2f}")
+                    else:
+                        response = {"status": "error", "message": "Sem aposta ativa ou já sacou.", "balance": current_player_balance}
+                else:
+                    response = {"status": "error", "message": "Jogo não está em execução.", "balance": current_player_balance}
+            
+            elif command == "status":
+                response = {
+                    "status": "game_status",
+                    "game_status": game_state["status"],
+                    "multiplier": game_state["multiplier"],
+                    "history": game_state["history"][-10:],
+                    "balance": current_player_balance,
+                    "player_name": current_player_name_for_log
+                }
+            
+            elif command == "get_ranking":
+                # Prepara os dados para o ranking: lista de dicionários {"name": X, "balance": Y}
+                ranking_list = []
+                for ip, data in player_data_store.items():
+                    ranking_list.append({
+                        "name": data.get("name", f"{DEFAULT_PLAYER_NAME}_{ip.split('.')[-1]}"), # Usa nome ou default
+                        "balance": data.get("balance", 0)
+                    })
+                
+                # Ordena a lista pelo saldo, do maior para o menor
+                sorted_players = sorted(ranking_list, key=lambda x: x["balance"], reverse=True)
+                
+                response = {"status": "ranking_data", "ranking": sorted_players[:RANKING_TOP_N]}
+                print(f"Jogador '{current_player_name_for_log}' ({client_ip}) solicitou o ranking.")
+
+            client_socket.send(json.dumps(response).encode('utf-8'))
+            
+    except json.JSONDecodeError:
+        print(f"Erro ao decodificar JSON de '{get_player_name(client_ip)}' ({client_addr_tuple})")
+    except ConnectionResetError:
+        print(f"Conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}) resetada.")
+    except BrokenPipeError: # Adicionado para tratar pipe quebrado
+        print(f"Conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}) foi quebrada (BrokenPipe).")
+    except Exception as e:
+        print(f"Erro na conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}): {e}")
+    finally:
+        if client_addr_tuple in game_state["players"]:
+            del game_state["players"][client_addr_tuple]
+        client_socket.close()
+        print(f"Conexão TCP com '{get_player_name(client_ip)}' ({client_addr_tuple}) encerrada")
+
+
+# Função para enviar atualizações do jogo via UDP Broadcast (sem alterações)
+def broadcast_game_updates():
+    while True:
+        update = {
+            "status": game_state["status"],
+            "multiplier": game_state["multiplier"]
+        }
+        message = json.dumps(update).encode('utf-8')
+        broadcast_address = ('255.255.255.255', UDP_PORT)
         try:
-            tcp_socket.shutdown(socket.SHUT_RDWR)
-        except OSError:
+            udp_socket.sendto(message, broadcast_address)
+        except Exception as e:
+            # print(f"Erro ao enviar broadcast UDP: {e}") # Pode ser verboso
             pass
-        tcp_socket.close()
-    if udp_socket:
-        udp_socket.close()
-    print("Cliente encerrado.")
+        time.sleep(TICK_RATE)
+
+# Função principal do jogo (sem alterações na lógica de ranking aqui)
+def game_loop():
+    global game_state
+    
+    while True:
+        game_state["status"] = "waiting"
+        game_state["multiplier"] = 1.0
+        game_state["players"] = {}
+        print("\n----------------------------------")
+        print(f"Aguardando apostas (10 segundos)... Nomes e Saldos Atuais: ")
+        if player_data_store:
+            for ip, data in player_data_store.items():
+                print(f"  - IP: {ip}, Nome: {data.get('name', 'N/A')}, Saldo: {data.get('balance', 0):.2f}")
+        else:
+            print("  Nenhum jogador registrado ainda.")
+        time.sleep(10)
+        
+        if not game_state["players"]:
+            print("Nenhuma aposta recebida. Reiniciando ciclo...")
+            continue
+            
+        game_state["status"] = "running"
+        print("Jogo iniciado!")
+        
+        crashed = False
+        start_time = time.time()
+        while not crashed:
+            increment_factor = 0.01 + (game_state["multiplier"] * 0.0005) + ((time.time() - start_time) * 0.0001)
+            game_state["multiplier"] += increment_factor
+            game_state["multiplier"] = round(game_state["multiplier"], 2)
+
+            if (random.random() < CRASH_PROBABILITY or
+                game_state["multiplier"] >= MAX_MULTIPLIER):
+                crashed = True
+            
+            time.sleep(TICK_RATE)
+            if crashed:
+                break
+
+        game_state["status"] = "crashed"
+        final_crash_multiplier = game_state["multiplier"]
+        if final_crash_multiplier > MAX_MULTIPLIER: # Garante que não passe do teto
+            final_crash_multiplier = MAX_MULTIPLIER
+        
+        game_state["multiplier"] = round(final_crash_multiplier,2)
+
+        print(f"CRASH em {game_state['multiplier']:.2f}x")
+        
+        game_state["history"].append(game_state["multiplier"])
+        if len(game_state["history"]) > 20:
+            game_state["history"].pop(0)
+        
+        print("--- Resultados da Rodada ---")
+        for client_addr_key, player_round_data in list(game_state["players"].items()):
+            player_ip_for_round = player_round_data.get("ip", "IP Desconhecido")
+            player_name_for_round = get_player_name(player_ip_for_round)
+            
+            if player_round_data["cash_out"] is not None:
+                print(f"Jogador '{player_name_for_round}' ({player_ip_for_round}) FEZ cash out em {player_round_data['cash_out']:.2f}x.")
+            else:
+                print(f"Jogador '{player_name_for_round}' ({player_ip_for_round}) NÃO FEZ cash out e perdeu {player_round_data['bet']:.2f}.")
+        
+        print(f"Saldos Finais da Rodada:")
+        if player_data_store:
+            for ip, data in player_data_store.items():
+                print(f"  - IP: {ip}, Nome: {data.get('name', 'N/A')}, Saldo: {data.get('balance', 0):.2f}")
+        else:
+             print("  Nenhum jogador com saldo registrado.")
+        print("----------------------------------")
+        
+        time.sleep(5)
+
+# Inicia as threads
+threading.Thread(target=game_loop, daemon=True).start()
+threading.Thread(target=broadcast_game_updates, daemon=True).start()
+
+# Loop principal para aceitar conexões TCP
+try:
+    while True:
+        client_socket, client_addr = tcp_socket.accept()
+        threading.Thread(target=handle_tcp_client, args=(client_socket, client_addr), daemon=True).start()
+except KeyboardInterrupt:
+    print("Servidor encerrado pelo usuário.")
+finally:
+    tcp_socket.close()
+    udp_socket.close()
+    print("Saldos finais (em memória):")
+    if player_data_store:
+        for ip, data in player_data_store.items():
+            print(f"  - IP: {ip}, Nome: {data.get('name', 'N/A')}, Saldo: {data.get('balance', 0):.2f}")
+    else:
+        print("  Nenhum jogador com dados para exibir.")
